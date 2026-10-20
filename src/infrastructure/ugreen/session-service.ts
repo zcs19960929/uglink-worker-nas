@@ -9,7 +9,7 @@ import type { ProxySessionService } from '../../application/gateway/ports';
 
 const CACHE_TTL_SECONDS = 3600;
 const DISCOVERY_TTL_SECONDS = 300;
-const AUTH_ATTEMPT_TTL_SECONDS = 300;
+const TRANSIENT_AUTH_FAILURE_TTL_SECONDS = 30;
 const DEFAULT_AUTH_FAILURE_TTL_SECONDS = 600;
 const LOCKED_AUTH_FAILURE_TTL_SECONDS = 1800;
 const BLOCKED_AUTH_FAILURE_TTL_SECONDS = 3600;
@@ -434,10 +434,6 @@ function authFailureKey(sessionNamespace: string): string {
   return `uglink:auth-failure:v1:${sessionNamespace}`;
 }
 
-export function authAttemptKey(sessionNamespace: string): string {
-  return `uglink:auth-attempt:v1:${sessionNamespace}`;
-}
-
 function parseStoredAuthIssue(value: string): ProxyAuthenticationIssue {
   const numericCode = Number(value);
   if (Number.isInteger(numericCode)) return numericCode;
@@ -459,6 +455,9 @@ async function readRecentAuthFailure(runtime: UgreenSessionRuntime): Promise<Pro
 
 function authenticationFailureTtl(issue: ProxyAuthenticationIssue): number {
   switch (issue) {
+    case 'timeout':
+    case 'unavailable':
+      return TRANSIENT_AUTH_FAILURE_TTL_SECONDS;
     case 1120:
     case 1113:
       return LOCKED_AUTH_FAILURE_TTL_SECONDS;
@@ -479,29 +478,6 @@ async function cacheAuthenticationFailure(
   await runtime.cache.put(authFailureKey(runtime.sessionNamespace), String(error.apiCode), {
     expirationTtl: authenticationFailureTtl(error.apiCode)
   });
-}
-
-async function reserveAuthenticationAttempt(runtime: UgreenSessionRuntime): Promise<string> {
-  const recentFailure = await readRecentAuthFailure(runtime);
-  if (recentFailure) throw recentFailure;
-
-  const key = authAttemptKey(runtime.sessionNamespace);
-  if (await runtime.cache.get(key)) throw new ProxyAuthenticationError('backoff');
-
-  const attemptId = crypto.randomUUID();
-  await runtime.cache.put(key, attemptId, { expirationTtl: AUTH_ATTEMPT_TTL_SECONDS });
-  if (await runtime.cache.get(key) !== attemptId) {
-    throw new ProxyAuthenticationError('backoff');
-  }
-  return attemptId;
-}
-
-async function releaseAuthenticationAttempt(
-  runtime: UgreenSessionRuntime,
-  attemptId: string
-): Promise<void> {
-  const key = authAttemptKey(runtime.sessionNamespace);
-  if (await runtime.cache.get(key) === attemptId) await runtime.cache.delete(key);
 }
 
 export async function clearProxySession(runtime: UgreenSessionRuntime, port: string): Promise<void> {
@@ -774,7 +750,8 @@ async function createProxySessionAtOrigin(
         });
         if (!loginResponse.ok) {
           await loginResponse.body?.cancel();
-          throw new ProxyAuthenticationError('unknown');
+          throw new ProxyAuthenticationError(loginResponse.status >= 500 || loginResponse.status === 429
+            ? 'unavailable' : 'unknown');
         }
         const cookies = responseCookies(loginResponse.headers, loginUrl);
         const data = getLoginData(
@@ -828,7 +805,8 @@ async function createProxySessionAtOrigin(
         });
         if (!dockerTokenResponse.ok) {
           await dockerTokenResponse.body?.cancel();
-          throw new ProxyAuthenticationError('unknown');
+          throw new ProxyAuthenticationError(dockerTokenResponse.status >= 500 || dockerTokenResponse.status === 429
+            ? 'unavailable' : 'unknown');
         }
         return getRedirectUrl(
           await readJsonWithLimit(dockerTokenResponse, MAX_AUTH_RESPONSE_BYTES, 'Docker token API')
@@ -1014,7 +992,8 @@ export async function createProxySession(
   port: string,
   forceDiscovery = false
 ): Promise<ProxySession> {
-  const attemptId = await reserveAuthenticationAttempt(runtime);
+  const recentFailure = await readRecentAuthFailure(runtime);
+  if (recentFailure) throw recentFailure;
   try {
     const discovered = await getDiscoveredOrigin(runtime, forceDiscovery);
     let session: ProxySession;
@@ -1028,7 +1007,6 @@ export async function createProxySession(
       const refreshed = await getDiscoveredOrigin(runtime, true);
       session = await createProxySessionAtOrigin(runtime, port, refreshed.origin);
     }
-    await releaseAuthenticationAttempt(runtime, attemptId);
     return session;
   } catch (error) {
     if (error instanceof ProxyAuthenticationError && error.apiCode !== 'backoff') {
@@ -1044,22 +1022,46 @@ export async function getProxySession(runtime: UgreenSessionRuntime, port: strin
   return createProxySession(runtime, port);
 }
 
-export async function invalidateProxySession(runtime: UgreenSessionRuntime, port: string): Promise<void> {
+function sameSession(left: ProxySession, right: ProxySession): boolean {
+  return left.cookie === right.cookie && left.origin === right.origin && left.loginOrigin === right.loginOrigin;
+}
+
+export async function invalidateProxySession(
+  runtime: UgreenSessionRuntime, port: string, previous?: ProxySession
+): Promise<void> {
+  if (previous) {
+    const current = await readProxySession(runtime, port);
+    if (current && !sameSession(current, previous)) return;
+  }
   await Promise.all([
     clearProxySession(runtime, port),
     runtime.cache.delete(discoveryCacheKey(runtime.sessionNamespace))
   ]);
 }
 
-export async function refreshProxySession(runtime: UgreenSessionRuntime, port: string): Promise<ProxySession> {
+export async function refreshProxySession(
+  runtime: UgreenSessionRuntime, port: string, previous?: ProxySession
+): Promise<ProxySession> {
+  if (previous) {
+    const current = await readProxySession(runtime, port);
+    if (current && !sameSession(current, previous)) return current;
+  }
   await invalidateProxySession(runtime, port);
   return createProxySession(runtime, port, true);
 }
 
 export function createUgreenSessionService(runtime: UgreenSessionRuntime): ProxySessionService {
+  // One service instance belongs to one Durable Object. Keep the queue there,
+  // never in a Worker module global or in an eventually-consistent KV lease.
+  let tail: Promise<void> = Promise.resolve();
+  function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = tail.then(operation);
+    tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
   return {
-    get: (port) => getProxySession(runtime, port),
-    refresh: (port) => refreshProxySession(runtime, port),
-    invalidate: (port) => invalidateProxySession(runtime, port)
+    get: (port) => enqueue(() => getProxySession(runtime, port)),
+    refresh: (port, previous) => enqueue(() => refreshProxySession(runtime, port, previous)),
+    invalidate: (port, previous) => enqueue(() => invalidateProxySession(runtime, port, previous))
   };
 }

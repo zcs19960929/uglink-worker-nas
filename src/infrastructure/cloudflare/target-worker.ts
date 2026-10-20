@@ -1,4 +1,4 @@
-import source from '../../../.generated/gateway/worker.js?raw';
+import source from '../../../.generated/gateway/entry.js?raw';
 
 export const TARGET_WORKER_SOURCE = source;
 export const TARGET_WORKER_MODULE = 'uglink-worker.mjs';

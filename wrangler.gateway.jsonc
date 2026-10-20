@@ -1,11 +1,15 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "uglink-worker",
-  "main": "src/interfaces/http/gateway/worker.ts",
+  "main": "src/interfaces/http/gateway/entry.ts",
   "compatibility_date": "2026-08-03",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "durable_objects": {
+    "bindings": [{ "name": "UGLINK_SESSIONS", "class_name": "UgreenSessionCoordinator" }]
+  },
+  "migrations": [{ "tag": "uglink-sessions-v1", "new_sqlite_classes": ["UgreenSessionCoordinator"] }],
   "placement": {
     "mode": "smart"
   },

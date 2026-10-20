@@ -91,4 +91,10 @@ test('the shipped Wrangler configuration enables Smart Placement when generated'
   const config = resolveUglinkConfig({ version: 2, uglink: { id: '', username: '' }, services: [] });
   const generated = await generateWranglerConfig(shippedConfig, config);
   assert.deepEqual(generated.placement, { mode: 'smart' });
+  assert.deepEqual(generated.durable_objects, {
+    bindings: [{ name: 'UGLINK_SESSIONS', class_name: 'UgreenSessionCoordinator' }]
+  });
+  assert.deepEqual(generated.migrations, [{
+    tag: 'uglink-sessions-v1', new_sqlite_classes: ['UgreenSessionCoordinator']
+  }]);
 });

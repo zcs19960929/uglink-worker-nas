@@ -105,7 +105,7 @@ flowchart LR
 
 API Token 和 NAS 密码由用户在浏览器输入并提交，不持久化到浏览器存储。API Token 加密保存在控制台服务端会话中，NAS 密码保存在 Gateway 的 Worker Secret 中。
 
-访问流量经过 Cloudflare 和绿联服务；控制台配置存入本地 SQLite 或云端 KV，网关代理会话使用 Cloudflare KV。加密备份包含 Cloudflare 连接等敏感信息，但不包含无法回读的 NAS 密码。详细边界见 [安全策略](SECURITY.md)。
+访问流量经过 Cloudflare 和绿联服务；控制台配置存入本地 SQLite 或云端 KV，网关代理会话由 SQLite Durable Object 协调和保存。加密备份包含 Cloudflare 连接等敏感信息，但不包含无法回读的 NAS 密码。详细边界见 [安全策略](SECURITY.md)。
 
 ## 更新与备份
 

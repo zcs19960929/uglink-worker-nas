@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "uglink-gateway-bundle",
-  "main": "src/interfaces/http/gateway/worker.ts",
+  "main": "src/interfaces/http/gateway/entry.ts",
   "compatibility_date": "2026-08-03",
   "compatibility_flags": ["nodejs_compat"]
 }

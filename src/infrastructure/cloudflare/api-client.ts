@@ -54,11 +54,13 @@ interface CloudflareSecret {
 }
 
 interface CloudflareWorkerSettings {
+  migration_tag?: string;
   bindings?: Array<{
     name?: string;
     type?: string;
     text?: string;
     namespace_id?: string;
+    class_name?: string;
   }>;
 }
 
@@ -366,16 +368,28 @@ export async function uploadProxyWorker(
   namespace: CloudflareKvNamespace
 ): Promise<CloudflareUploadResult> {
   const runtimeBindings = await createWorkerRuntimeBindings(config);
+  const settings = await cloudflareEnvelope<CloudflareWorkerSettings>(
+    `/accounts/${encodeURIComponent(target.accountId)}/workers/scripts/${encodeURIComponent(target.workerName)}/settings`,
+    apiToken, {}, true
+  );
+  const hasCoordinator = settings?.result.bindings?.some((binding) => (
+    binding.type === 'durable_object_namespace' && binding.class_name === 'UgreenSessionCoordinator'
+  ));
   const metadata = {
     main_module: TARGET_WORKER_MODULE,
     bindings: [
       { name: 'UGLINK_CACHE', type: 'kv_namespace', namespace_id: namespace.id },
+      { name: 'UGLINK_SESSIONS', type: 'durable_object_namespace', class_name: 'UgreenSessionCoordinator' },
       ...Object.entries(runtimeBindings).map(([name, text]) => ({ name, type: 'plain_text', text })),
       { name: CONTROL_MANAGED_BINDING, type: 'plain_text', text: CONTROL_MANAGED_MARKER }
     ],
     compatibility_date: TARGET_COMPATIBILITY_DATE,
     compatibility_flags: ['nodejs_compat'],
     keep_bindings: ['secret_text', 'secret_key'],
+    ...(!hasCoordinator ? { migrations: {
+      ...(settings?.result.migration_tag ? { old_tag: settings.result.migration_tag } : {}),
+      new_tag: 'uglink-sessions-v1', new_sqlite_classes: ['UgreenSessionCoordinator']
+    } } : {}),
     placement: { mode: 'smart' },
     observability: { enabled: true, head_sampling_rate: 1 }
   };

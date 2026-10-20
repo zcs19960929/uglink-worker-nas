@@ -4,6 +4,7 @@ import type { GatewayLogger, ProxySessionService, ProxyTransport } from './ports
 
 const HEALTH_PATH = '/.well-known/uglink-worker-health';
 const REPLAY_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const TRANSIENT_UPSTREAM_STATUSES = new Set([502, 503, 504]);
 
 export interface GatewayRuntime {
   serviceMap: string;
@@ -17,7 +18,7 @@ export interface GatewayDependencies {
 }
 
 function canReplayAutomatically(request: Request): boolean {
-  return REPLAY_SAFE_METHODS.has(request.method) && request.body === null;
+  return REPLAY_SAFE_METHODS.has(request.method) && request.body === null && !request.headers.has('Upgrade');
 }
 
 function jsonResponse(request: Request, value: unknown, status = 200): Response {
@@ -91,16 +92,23 @@ export async function handleGatewayRequest(
     try {
       response = await dependencies.transport.send(request, session);
     } catch {
-      await dependencies.sessions.invalidate(port);
+      await dependencies.sessions.invalidate(port, session);
       dependencies.logger.info({ event: 'proxy_upstream_unavailable', hostname, port, method: request.method });
       if (!canReplayAutomatically(request)) return proxySessionResponse(request, false);
-      session = await dependencies.sessions.refresh(port);
+      session = await dependencies.sessions.refresh(port, session);
       try {
         response = await dependencies.transport.send(request, session);
       } catch (error) {
-        await dependencies.sessions.invalidate(port);
+        await dependencies.sessions.invalidate(port, session);
         throw error;
       }
+    }
+
+    if (TRANSIENT_UPSTREAM_STATUSES.has(response.status) && canReplayAutomatically(request)) {
+      const status = response.status;
+      await response.body?.cancel();
+      dependencies.logger.info({ event: 'proxy_upstream_retry', hostname, port, status, method: request.method });
+      response = await dependencies.transport.send(request, session);
     }
 
     if (dependencies.transport.isSessionExpired(response, session)) {
@@ -108,20 +116,20 @@ export async function handleGatewayRequest(
       dependencies.logger.info({ event: 'proxy_session_expired', hostname, port, method: request.method });
 
       if (!canReplayAutomatically(request)) {
-        await dependencies.sessions.invalidate(port);
+        await dependencies.sessions.invalidate(port, session);
         return proxySessionResponse(request, true);
       }
 
-      session = await dependencies.sessions.refresh(port);
+      session = await dependencies.sessions.refresh(port, session);
       try {
         response = await dependencies.transport.send(request, session);
       } catch (error) {
-        await dependencies.sessions.invalidate(port);
+        await dependencies.sessions.invalidate(port, session);
         throw error;
       }
       if (dependencies.transport.isSessionExpired(response, session)) {
         await response.body?.cancel();
-        await dependencies.sessions.invalidate(port);
+        await dependencies.sessions.invalidate(port, session);
         return proxySessionResponse(request, false);
       }
     }

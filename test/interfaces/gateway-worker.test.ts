@@ -3,7 +3,8 @@ import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import worker from '../../src/interfaces/http/gateway/worker';
 import type { GatewayWorkerEnv } from '../../src/interfaces/http/gateway/environment';
-import { cacheKeys, discoveryCacheKey } from '../../src/infrastructure/ugreen/session-service';
+import { cacheKeys, createUgreenSessionService, discoveryCacheKey } from '../../src/infrastructure/ugreen/session-service';
+import { ProxyAuthenticationError } from '../../src/domain/proxy/errors';
 
 function fakeKv(initialValues: Record<string, string>): {
   namespace: KVNamespace;
@@ -39,11 +40,32 @@ function cachedEnvironment(): {
       loginOrigin: 'https://test-device.example.ug.link'
     })
   });
+  const sessions = createUgreenSessionService({
+    uglinkId: 'test-device', username: 'test-user', password: 'test-password',
+    sessionNamespace: 'stable-client-id', cache: kv.namespace
+  });
   return {
     keys,
     values: kv.values,
     env: {
       UGLINK_CACHE: kv.namespace,
+      UGLINK_SESSIONS: {
+        getByName: () => ({
+          async operate(operation, port, previous) {
+            try {
+              if (operation === 'invalidate') {
+                await sessions.invalidate(port, previous);
+                return { ok: true };
+              }
+              return { ok: true, session: operation === 'get'
+                ? await sessions.get(port) : await sessions.refresh(port, previous) };
+            } catch (error) {
+              if (error instanceof ProxyAuthenticationError) return { ok: false, issue: error.apiCode };
+              throw error;
+            }
+          }
+        })
+      },
       UGLINK_ID: 'test-device',
       USERNAME: 'test-user',
       PASSWORD: 'test-password',
@@ -135,6 +157,36 @@ test('application 401 and 403 responses pass through without refreshing UGREEN',
     assert.equal(calls, 1);
     assert.equal(JSON.parse(values.get(keys.session) ?? '').cookie, 'ugreen-proxy-token=cached-session');
   }
+});
+
+test('a transient HTTP 503 retries a GET once without logging in again', async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const { env } = cachedEnvironment();
+  let calls = 0;
+  globalThis.fetch = async () => ++calls === 1
+    ? new Response('temporary outage', { status: 503 })
+    : new Response('recovered');
+  const response = await worker.fetch(new Request('https://service.example.com/v1/models'), env);
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'recovered');
+  assert.equal(calls, 2);
+});
+
+test('transient HTTP errors are bounded and never replay a POST body', async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const { env } = cachedEnvironment();
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response('unavailable', { status: 503 }); };
+  assert.equal((await worker.fetch(new Request('https://service.example.com/v1/models'), env)).status, 503);
+  assert.equal(calls, 2);
+  calls = 0;
+  const response = await worker.fetch(new Request('https://service.example.com/v1/models', {
+    method: 'POST', body: 'must not replay'
+  }), env);
+  assert.equal(response.status, 503);
+  assert.equal(calls, 1);
 });
 
 test('a UGREEN login redirect refreshes the session and retries a GET once', async (context) => {

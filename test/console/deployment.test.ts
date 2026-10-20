@@ -226,10 +226,17 @@ describe('production Cloudflare deployment', () => {
     const metadata = JSON.parse(await (metadataPart as Blob).text()) as {
       placement: { mode: string };
       keep_bindings: string[];
+      migrations?: { new_tag: string; new_sqlite_classes: string[] };
       bindings: Array<{ name: string; type: string; namespace_id?: string }>;
     };
     expect(metadata.placement).toEqual({ mode: 'smart' });
     expect(metadata.keep_bindings).toEqual(['secret_text', 'secret_key']);
+    expect(metadata.bindings).toContainEqual({
+      name: 'UGLINK_SESSIONS', type: 'durable_object_namespace', class_name: 'UgreenSessionCoordinator'
+    });
+    expect(metadata.migrations).toEqual({
+      new_tag: 'uglink-sessions-v1', new_sqlite_classes: ['UgreenSessionCoordinator']
+    });
     expect(metadata.bindings).toContainEqual({
       name: 'UGLINK_CACHE',
       type: 'kv_namespace',
@@ -377,7 +384,12 @@ describe('production Cloudflare deployment', () => {
       const url = String(input);
       const method = init?.method || 'GET';
       if (url.endsWith('/workers/scripts/uglink-test/settings') && method === 'GET') {
-        return envelope({ bindings: [{ name: 'UGLINK_CONTROL_MANAGED', type: 'plain_text', text: 'v1' }] });
+        return envelope({ bindings: [
+          { name: 'UGLINK_CONTROL_MANAGED', type: 'plain_text', text: 'v1' },
+          ...(uploadCount > 0 ? [{
+            name: 'UGLINK_SESSIONS', type: 'durable_object_namespace', class_name: 'UgreenSessionCoordinator'
+          }] : [])
+        ] });
       }
       if (url.endsWith('/secrets') && method === 'GET') {
         return envelope([{ name: 'PASSWORD', type: 'secret_text' }]);
@@ -390,6 +402,9 @@ describe('production Cloudflare deployment', () => {
         const metadata = JSON.parse(await metadataPart.text());
         expect(metadata.placement).toEqual({ mode: 'smart' });
         expect(metadata.keep_bindings).toEqual(['secret_text', 'secret_key']);
+        expect(metadata.migrations).toEqual(uploadCount === 0 ? {
+          new_tag: 'uglink-sessions-v1', new_sqlite_classes: ['UgreenSessionCoordinator']
+        } : undefined);
         uploadCount += 1;
         return envelope({ deployment_id: `deployment-${uploadCount}` });
       }

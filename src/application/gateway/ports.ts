@@ -2,8 +2,8 @@ import type { ProxySession } from '../../domain/proxy/model';
 
 export interface ProxySessionService {
   get(port: string): Promise<ProxySession>;
-  refresh(port: string): Promise<ProxySession>;
-  invalidate(port: string): Promise<void>;
+  refresh(port: string, previous?: ProxySession): Promise<ProxySession>;
+  invalidate(port: string, previous?: ProxySession): Promise<void>;
 }
 
 export interface ProxyTransport {

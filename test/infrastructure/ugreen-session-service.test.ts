@@ -7,7 +7,6 @@ import {
 } from 'node:crypto';
 import test from 'node:test';
 import {
-  authAttemptKey,
   cacheKeys,
   createProxySession,
   discoveryCacheKey
@@ -79,7 +78,6 @@ function runtime(cache: KVNamespace) {
 
 test('cache keys isolate discovery and sessions by namespace and port', () => {
   assert.equal(discoveryCacheKey('account-a'), 'uglink:discovery:v1:account-a');
-  assert.equal(authAttemptKey('account-a'), 'uglink:auth-attempt:v1:account-a');
   assert.deepEqual(cacheKeys('account-a', '8317'), {
     session: 'uglink:session:v2:account-a:8317'
   });
@@ -198,7 +196,7 @@ test('runtime discovery is cached for five minutes and creates an atomic proxy s
   assert.equal(requestedUrls[0], 'https://api-zh.ugnas.com/api/p2p/v2/ta/nodeInfo/byAlias');
   assert.equal(kv.ttls.get(discoveryCacheKey('stable-client-id')), 300);
   assert.equal(kv.ttls.get(cacheKeys('stable-client-id', '8317').session), 3600);
-  assert.equal(kv.values.has(authAttemptKey('stable-client-id')), false);
+  assert.equal(kv.values.has('uglink:auth-attempt:v1:stable-client-id'), false);
   assert.deepEqual(JSON.parse(kv.values.get(cacheKeys('stable-client-id', '8317').session) ?? ''), session);
 });
 
@@ -509,23 +507,7 @@ test('OTP-required responses stop before docker token exchange and apply a long 
   assert.equal(loginCalls, 1);
   assert.equal(kv.values.get('uglink:auth-failure:v1:stable-client-id'), 'otp_required');
   assert.equal(kv.ttls.get('uglink:auth-failure:v1:stable-client-id'), 3600);
-  assert.equal(kv.ttls.get(authAttemptKey('stable-client-id')), 300);
-});
-
-test('an active authentication attempt suppresses concurrent login requests', async (context) => {
-  const originalFetch = globalThis.fetch;
-  context.after(() => {
-    globalThis.fetch = originalFetch;
-  });
-  globalThis.fetch = async () => {
-    throw new Error('Authentication backoff must stop all upstream requests');
-  };
-  const kv = fakeKv({ [authAttemptKey('stable-client-id')]: 'another-attempt' });
-
-  await assert.rejects(
-    createProxySession(runtime(kv.cache), '8317'),
-    (error: unknown) => error instanceof ProxyAuthenticationError && error.apiCode === 'backoff'
-  );
+  assert.equal(kv.values.has('uglink:auth-attempt:v1:stable-client-id'), false);
 });
 
 test('discovery rejects relay domains outside the UGREEN trust boundary', async (context) => {
